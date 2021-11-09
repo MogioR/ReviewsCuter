@@ -2,9 +2,11 @@ import re
 import json
 
 import pandas as pd
+import nltk
 from google.cloud import language_v1
 from natasha import Segmenter, MorphVocab, NewsEmbedding, NewsMorphTagger, NewsNERTagger, Doc, NewsSyntaxParser
 from nltk.corpus import stopwords
+nltk.download('stopwords')
 
 from Modules.google_sheets_api import GoogleSheetsApi
 
@@ -14,6 +16,8 @@ ALPHABET = ["а", "б", "в", "г", "д", "е", "ё", "ж", "з", "и", "й", "�
             "r", "s", "t", "u", "v", "w", "x", "y", "z"]
 ALPHABET = list(map(lambda x: x.upper(), ALPHABET)) + ALPHABET
 
+BLACK_KEYS = ['', 'и', 'на']
+MIN_SHORT_REVIEW_SIZE = 100
 
 class ReviewsCuterService:
     def __init__(self):
@@ -37,11 +41,15 @@ class ReviewsCuterService:
         for row in raw_data:
             self.data = self.data.append({'comment_id': row[0], 'review_text': row[1]}, ignore_index=True)
 
-            if i == 99:
-               break
-            i += 1
+            # if i == 10:
+            #     break
+            # i += 1
 
-        print(sum(list(map(len, list(self.data['review_text'].values)))))
+    # Load reviews from tsv_file
+    def load_from_tsv_reviews(self, tsv_file):
+        self.data = pd.read_csv(tsv_file, sep='\t', names=['comment_id', 'review_text', 'comment_id2', 'section_id'])
+        # self.data = self.data.head(10)
+        # print(self.data)
 
     # Download black words from google sheets
     def download_black_words(self, token, document_id, list_name):
@@ -52,8 +60,8 @@ class ReviewsCuterService:
 
     def clear_text(self, text):
         # Del stop_words and non letter symbols
-        cleared_text = ''.join([letter if letter in ALPHABET else ' ' for letter in text])
-        cleared_text = ' '.join([word for word in cleared_text.split() if word not in self.stop_words])
+        # cleared_text = ''.join([letter if letter in ALPHABET else ' ' for letter in text])
+        cleared_text = ' '.join([word for word in text.split() if word not in self.stop_words])
 
         # Segmentation
         doc = Doc(cleared_text)
@@ -78,28 +86,39 @@ class ReviewsCuterService:
 
     def tokenize(self):
         self.data['review_clear'] = list(map(self.clear_text, self.data['review_text']))
+        print(sum(list(map(len, list(self.data['review_text'].values)))))
         print(sum(list(map(len, list(self.data['review_clear'].values)))))
-        print(self.data['review_text'].values[1])
-        print(self.data['review_clear'].values[1])
+        # print(self.data['review_text'].values[1])
+        # print(self.data['review_clear'].values[1])
 
     def get_google_analysis(self):
         reports = []
         data = self.data['review_clear'].values
+        selectionids = self.data['section_id'].values
+
         buf_block = ''
         buf_reviews = []
+        buf_keywords = []
 
         for i in range(len(data)):
             if len(buf_block) + len(data[i]) <= 1000:
                 buf_block += data[i]
                 buf_reviews.append(i)
+                for key in str(selectionids[i]).split(' '):
+                    if key not in BLACK_KEYS and key not in buf_keywords:
+                        buf_keywords.append(key.lower())
             else:
-                reports.append([self.get_list_entities(buf_block), buf_reviews])
+                reports.append([self.get_list_entities(buf_block), buf_reviews]+buf_keywords)
                 buf_block = ''
                 buf_reviews = []
+                buf_keywords = []
                 buf_block += data[i]
                 buf_reviews.append(i)
+                for key in str(selectionids[i]).split(' '):
+                    if key not in BLACK_KEYS and key not in buf_keywords:
+                        buf_keywords.append(key.lower())
 
-        reports.append([self.get_list_entities(buf_block), buf_reviews])
+        reports.append([self.get_list_entities(buf_block), buf_reviews]+buf_keywords)
 
         return reports
 
@@ -146,11 +165,16 @@ class ReviewsCuterService:
         # Delete start of first sentence
         skipped_part = ''
         stop_flag = False
-        for sentence in doc.sents:
+        main_sentence = 0
+        for sentence_num, sentence in enumerate(doc.sents):
             if sentence.text != '':
-                for token in sentence.tokens:
+                main_sentence = sentence_num
+                for i, token in enumerate(sentence.tokens):
                     if token.rel == 'root':
-                        if not self.regularity_check(sentence.text[:token.start-sentence.start], entities):
+                        has_entity_before_root = self.regularity_check(sentence.text[:token.start-sentence.start],
+                                                                       entities)
+                        root_is_last = i == len(sentence.tokens) - 1
+                        if not has_entity_before_root and not root_is_last:
                             skipped_part = sentence.text[:token.start - sentence.start]
                             sentence.text = sentence.text[token.start-sentence.start:]
                             # print(sentence.text)
@@ -165,10 +189,27 @@ class ReviewsCuterService:
             if sentence.text != '':
                 sentences.append(sentence.text)
 
+        short_review = ' '.join(sentences)
+        if skipped_part != '':
+            short_review = '...' + short_review
+
+
+        # Check len review
+        doc = Doc(review)
+        doc.segment(self.natasha_segmenter)
+        i = main_sentence
+        while len(short_review) < MIN_SHORT_REVIEW_SIZE and i-1 >= 0:
+            i -= 1
+            short_review = doc.sents[i].text.strip() + ' ' + short_review
+
+        i = main_sentence
+        while len(short_review) < MIN_SHORT_REVIEW_SIZE and i+1 < len(doc.sents):
+            i += 1
+            short_review = short_review.strip() + ' ' + doc.sents[i].text.strip()
+
         # print(review)
         # print(' '.join(sentences))
-
-        return ' '.join(sentences), skipped_part, deleted_sentences
+        return short_review, skipped_part, deleted_sentences
 
     @staticmethod
     def regularity_check(data: str, dictionary: list):
@@ -177,14 +218,13 @@ class ReviewsCuterService:
 
         for word in dictionary:
             including = including or (
-                        re.search(r'^' + word + '[^A-Za-zА-ЯЁа-яё]|[^A-Za-zА-ЯЁа-яё]' + word +
-                                  '[^A-Za-zА-ЯЁа-яё]|[^A-Za-zА-ЯЁа-яё]' + word + '$'
+                        re.search(r'^' + word.lower() + '[^A-Za-zА-ЯЁа-яё]|[^A-Za-zА-ЯЁа-яё]' + word.lower() +
+                                  '[^A-Za-zА-ЯЁа-яё]|[^A-Za-zА-ЯЁа-яё]' + word.lower() + '$'
                                   , data_str) is not None)
             if including is True:
                 break
 
         return including
-
 
     @staticmethod
     def get_list_entities(text_block):
@@ -198,7 +238,13 @@ class ReviewsCuterService:
 
         detected_entities = []
         for entity in response.entities:
-            detected_entities.append(entity.name)
+            cleared_text = ''.join([letter if letter in ALPHABET else ' ' for letter in entity.name])
+            cleared_text = cleared_text.strip()
+            words = cleared_text.split(' ')
+            for word in words:
+                if word != '':
+                    detected_entities.append(word)
 
+        # print('Google entities: ', detected_entities)
         return detected_entities
 
