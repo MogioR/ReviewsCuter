@@ -19,6 +19,7 @@ ALPHABET = list(map(lambda x: x.upper(), ALPHABET)) + ALPHABET
 BLACK_KEYS = ['', 'и', 'на']
 MIN_SHORT_REVIEW_SIZE = 100
 
+
 class ReviewsCuterService:
     def __init__(self):
         self.black_words = []
@@ -48,7 +49,7 @@ class ReviewsCuterService:
     # Load reviews from tsv_file
     def load_from_tsv_reviews(self, tsv_file):
         self.data = pd.read_csv(tsv_file, sep='\t', names=['comment_id', 'review_text', 'comment_id2', 'section_id'])
-        # self.data = self.data.head(10)
+        # self.data = self.data.head(1)
         # print(self.data)
 
     # Download black words from google sheets
@@ -147,6 +148,7 @@ class ReviewsCuterService:
         return all_new_reviews, all_skipped_parts, all_deleted_sentences
 
     def shortening_review(self, review, entities):
+        print(entities)
         doc = Doc(review)
         doc.segment(self.natasha_segmenter)
         doc.parse_syntax(self.natasha_syntax_parser)
@@ -180,6 +182,7 @@ class ReviewsCuterService:
                             # print(sentence.text)
                         stop_flag = True
                         break
+                stop_flag = True
             if stop_flag:
                 break
 
@@ -188,15 +191,18 @@ class ReviewsCuterService:
         for sentence in doc.sents:
             if sentence.text != '':
                 sentences.append(sentence.text)
+                break
 
         short_review = ' '.join(sentences)
         if skipped_part != '':
             short_review = '...' + short_review
 
-
         # Check len review
         doc = Doc(review)
         doc.segment(self.natasha_segmenter)
+        for i, sent in enumerate(doc.sents):
+            print(i, ') ', sent)
+
         i = main_sentence
         while len(short_review) < MIN_SHORT_REVIEW_SIZE and i-1 >= 0:
             i -= 1
@@ -207,8 +213,8 @@ class ReviewsCuterService:
             i += 1
             short_review = short_review.strip() + ' ' + doc.sents[i].text.strip()
 
-        # print(review)
-        # print(' '.join(sentences))
+        print(review)
+        print(short_review)
         return short_review, skipped_part, deleted_sentences
 
     @staticmethod

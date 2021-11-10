@@ -150,6 +150,8 @@ crashlytics.properties
 crashlytics-build.properties
 fabric.properties
 
-
+/Environment
 *.json
 *.txt
+*.tsv
+*.csv
